@@ -292,8 +292,153 @@ class SemevalModel:
                 )
             )
         return global_step, training_details
+    
 
-        
+    def eval_model(
+        self,
+        eval_df,
+        multi_label=False,
+        output_dir=None,
+        verbose=True,
+        silent=False,
+        wandb_log=True,
+        **kwargs,
+    ):
+        """
+        Evaluates the model on eval_df. Saves results to output_dir.
+        Args:
+            eval_df: Pandas Dataframe containing at least two columns. If the Dataframe has a header, it should contain a 'text' and a 'labels' column. If no header is present,
+            the Dataframe should contain at least two columns, with the first column containing the text, and the second column containing the label. The model will be evaluated on this Dataframe.
+            output_dir: The directory where model files will be saved. If not given, self.args.output_dir will be used.
+            verbose: If verbose, results will be printed to the console on completion of evaluation.
+            silent: If silent, tqdm progress bars will be hidden.
+            wandb_log: If True, evaluation results will be logged to wandb.
+            **kwargs: Additional metrics that should be used. Pass in the metrics as keyword arguments (name of metric: function to use). E.g. f1=sklearn.metrics.f1_score.
+                        A metric function should take in two parameters. The first parameter will be the true labels, and the second parameter will be the predictions.
+        Returns:
+            result: Dictionary containing evaluation results.
+            model_outputs: List of model outputs for each row in eval_df
+            wrong_preds: List of InputExample objects corresponding to each incorrect prediction by the model
+        """  # noqa: ignore flake8"
+
+        if not output_dir:
+            output_dir = self.args.output_dir
+
+        self._move_model_to_device()
+
+        result, model_outputs, wrong_preds = self.evaluate(
+            eval_df,
+            output_dir,
+            multi_label=multi_label,
+            verbose=verbose,
+            silent=silent,
+            wandb_log=wandb_log,
+            **kwargs,
+        )
+        self.results.update(result)
+
+        if verbose:
+            logger.info(self.results)
+
+        return result, model_outputs, wrong_preds
+
+
+    def compute_metrics(
+        self,
+        preds,
+        model_outputs,
+        labels,
+        eval_examples=None,
+        multi_label=False,
+        **kwargs,
+    ):
+        """
+        Computes the evaluation metrics for the model predictions.
+        Args:
+            preds: Model predictions
+            model_outputs: Model outputs
+            labels: Ground truth labels
+            eval_examples: List of examples on which evaluation was performed
+            **kwargs: Additional metrics that should be used. Pass in the metrics as keyword arguments (name of metric: function to use). E.g. f1=sklearn.metrics.f1_score.
+                        A metric function should take in two parameters. The first parameter will be the true labels, and the second parameter will be the predictions.
+        Returns:
+            result: Dictionary containing evaluation results.
+            For non-binary classification, the dictionary format is: (Matthews correlation coefficient, tp, tn, fp, fn).
+            For binary classification, the dictionary format is: (Matthews correlation coefficient, tp, tn, fp, fn, AUROC, AUPRC).
+            wrong: List of InputExample objects corresponding to each incorrect prediction by the model
+        """  # noqa: ignore flake8"
+
+        assert len(preds) == len(labels)
+
+        extra_metrics = {}
+        for metric, func in kwargs.items():
+            if metric.startswith("prob_"):
+                extra_metrics[metric] = func(labels, model_outputs)
+            else:
+                extra_metrics[metric] = func(labels, preds)
+
+        if multi_label:
+            threshold_values = self.args.threshold if self.args.threshold else 0.5
+            if isinstance(threshold_values, list):
+                mismatched = labels != [
+                    [
+                        self._threshold(pred, threshold_values[i])
+                        for i, pred in enumerate(example)
+                    ]
+                    for example in preds
+                ]
+            else:
+                mismatched = labels != [
+                    [self._threshold(pred, threshold_values) for pred in example]
+                    for example in preds
+                ]
+        else:
+            mismatched = labels != preds
+
+        if eval_examples:
+            wrong = [i for (i, v) in zip(eval_examples, mismatched) if v.any()]
+        else:
+            wrong = ["NA"]
+
+        if multi_label:
+            label_ranking_score = label_ranking_average_precision_score(labels, preds)
+            return {**{"LRAP": label_ranking_score}, **extra_metrics}, wrong
+        elif self.args.regression:
+            return {**extra_metrics}, wrong
+
+        mcc = matthews_corrcoef(labels, preds)
+        if self.model.num_labels == 2:
+            tn, fp, fn, tp = confusion_matrix(labels, preds, labels=[0, 1]).ravel()
+            if self.args.sliding_window:
+                return (
+                    {
+                        **{"mcc": mcc, "tp": tp, "tn": tn, "fp": fp, "fn": fn},
+                        **extra_metrics,
+                    },
+                    wrong,
+                )
+            else:
+                scores = np.array([softmax(element)[1] for element in model_outputs])
+                fpr, tpr, thresholds = roc_curve(labels, scores)
+                auroc = auc(fpr, tpr)
+                auprc = average_precision_score(labels, scores)
+                return (
+                    {
+                        **{
+                            "mcc": mcc,
+                            "tp": tp,
+                            "tn": tn,
+                            "fp": fp,
+                            "fn": fn,
+                            "auroc": auroc,
+                            "auprc": auprc,
+                        },
+                        **extra_metrics,
+                    },
+                    wrong,
+                )
+        else:
+            return {**{"mcc": mcc}, **extra_metrics}, wrong 
 
     def evaluate(
         self,
@@ -1181,6 +1326,40 @@ class SemevalModel:
             if not self.args.evaluate_during_training
             else training_progress_scores,
         )
+    
+
+    def _get_inputs_dict(self, batch, no_hf=False):
+        if self.args.use_hf_datasets and not no_hf:
+            return {key: value.to(self.device) for key, value in batch.items()}
+        if isinstance(batch[0], dict):
+            inputs = {
+                key: value.squeeze(1).to(self.device) for key, value in batch[0].items()
+            }
+            inputs["labels"] = batch[1].to(self.device)
+        else:
+            batch = tuple(t.to(self.device) for t in batch)
+
+            inputs = {
+                "input_ids": batch[0],
+                "attention_mask": batch[1],
+                "labels": batch[3],
+            }
+
+            # XLM, DistilBERT and RoBERTa don't use segment_ids
+            if self.args.model_type != "distilbert":
+                inputs["token_type_ids"] = (
+                    batch[2]
+                    if self.args.model_type in ["bert", "xlnet", "albert", "layoutlm"]
+                    else None
+                )
+
+        if self.args.model_type == "layoutlm":
+            inputs["bbox"] = batch[4]
+
+        return inputs
+
+    def _get_last_metrics(self, metric_values):
+        return {metric: values[-1] for metric, values in metric_values.items()}
 
     def _create_training_progress_scores(self, multi_label, **kwargs):
         return collections.defaultdict(list)
@@ -1291,6 +1470,22 @@ class SemevalModel:
     def save_model_args(self, output_dir):
         os.makedirs(output_dir, exist_ok=True)
         self.args.save(output_dir)
+    
+    def _calculate_loss(self, model, inputs, loss_fct, num_labels, args):
+        outputs = model(**inputs)
+        # model outputs are always tuple in pytorch-transformers (see doc)
+        loss = outputs[0]
+        if loss_fct:
+            logits = outputs[1]
+            labels = inputs["labels"]
+
+            loss = loss_fct(logits.view(-1, num_labels), labels.view(-1))
+        return (loss, *outputs[1:])
+
+    def _threshold(self, x, threshold):
+        if x >= threshold:
+            return 1
+        return 0
 
     def _move_model_to_device(self):
         self.model.to(self.device)
