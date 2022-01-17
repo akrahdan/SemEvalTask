@@ -1182,6 +1182,63 @@ class SemevalModel:
             else training_progress_scores,
         )
 
+    def _create_training_progress_scores(self, multi_label, **kwargs):
+        return collections.defaultdict(list)
+        """extra_metrics = {key: [] for key in kwargs}
+        if multi_label:
+            training_progress_scores = {
+                "global_step": [],
+                "LRAP": [],
+                "train_loss": [],
+                "eval_loss": [],
+                **extra_metrics,
+            }
+        else:
+            if self.model.num_labels == 2:
+                if self.args.sliding_window:
+                    training_progress_scores = {
+                        "global_step": [],
+                        "tp": [],
+                        "tn": [],
+                        "fp": [],
+                        "fn": [],
+                        "mcc": [],
+                        "train_loss": [],
+                        "eval_loss": [],
+                        **extra_metrics,
+                    }
+                else:
+                    training_progress_scores = {
+                        "global_step": [],
+                        "tp": [],
+                        "tn": [],
+                        "fp": [],
+                        "fn": [],
+                        "mcc": [],
+                        "train_loss": [],
+                        "eval_loss": [],
+                        "auroc": [],
+                        "auprc": [],
+                        **extra_metrics,
+                    }
+            elif self.model.num_labels == 1:
+                training_progress_scores = {
+                    "global_step": [],
+                    "train_loss": [],
+                    "eval_loss": [],
+                    **extra_metrics,
+                }
+            else:
+                training_progress_scores = {
+                    "global_step": [],
+                    "mcc": [],
+                    "train_loss": [],
+                    "eval_loss": [],
+                    **extra_metrics,
+                }
+        return training_progress_scores"""
+
+
     def load_and_cache_examples(
         self,
         examples,
