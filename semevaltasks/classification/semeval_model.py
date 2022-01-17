@@ -43,7 +43,7 @@ from semevaltasks.classification.utils import (
 )
 from tqdm.auto import tqdm, trange
 from transformers.optimization import AdamW, Adafactor
-from config import SemEvalModelArgs
+from semevaltasks.config import SemEvalModelArgs
 import os
 from transformers import (
     ElectraConfig,
