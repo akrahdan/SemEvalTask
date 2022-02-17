@@ -193,14 +193,8 @@ class SemevalModel:
 
             
         
-
-
-
-            
-
     def train_model(self,
         train_df,
-        multi_label=False,
         output_dir=None,
         show_running_loss=True,
         args=None,
@@ -276,7 +270,6 @@ class SemevalModel:
         global_step, training_details = self.train(
             train_dataloader,
             output_dir,
-            multi_label,
             show_running_loss,
             eval_df=eval_df,
             verbose=verbose,
@@ -297,7 +290,6 @@ class SemevalModel:
     def eval_model(
         self,
         eval_df,
-        multi_label=False,
         output_dir=None,
         verbose=True,
         silent=False,
@@ -329,7 +321,6 @@ class SemevalModel:
         result, model_outputs, wrong_preds = self.evaluate(
             eval_df,
             output_dir,
-            multi_label=multi_label,
             verbose=verbose,
             silent=silent,
             wandb_log=wandb_log,
@@ -349,7 +340,6 @@ class SemevalModel:
         model_outputs,
         labels,
         eval_examples=None,
-        multi_label=False,
         **kwargs,
     ):
         """
@@ -377,66 +367,41 @@ class SemevalModel:
             else:
                 extra_metrics[metric] = func(labels, preds)
 
-        if multi_label:
-            threshold_values = self.args.threshold if self.args.threshold else 0.5
-            if isinstance(threshold_values, list):
-                mismatched = labels != [
-                    [
-                        self._threshold(pred, threshold_values[i])
-                        for i, pred in enumerate(example)
-                    ]
-                    for example in preds
-                ]
-            else:
-                mismatched = labels != [
-                    [self._threshold(pred, threshold_values) for pred in example]
-                    for example in preds
-                ]
-        else:
-            mismatched = labels != preds
+       
+        mismatched = labels != preds
 
         if eval_examples:
             wrong = [i for (i, v) in zip(eval_examples, mismatched) if v.any()]
         else:
             wrong = ["NA"]
 
-        if multi_label:
-            label_ranking_score = label_ranking_average_precision_score(labels, preds)
-            return {**{"LRAP": label_ranking_score}, **extra_metrics}, wrong
-        elif self.args.regression:
+       
+        if self.args.regression:
             return {**extra_metrics}, wrong
 
         mcc = matthews_corrcoef(labels, preds)
         if self.model.num_labels == 2:
             tn, fp, fn, tp = confusion_matrix(labels, preds, labels=[0, 1]).ravel()
-            if self.args.sliding_window:
-                return (
-                    {
-                        **{"mcc": mcc, "tp": tp, "tn": tn, "fp": fp, "fn": fn},
-                        **extra_metrics,
+          
+            scores = np.array([softmax(element)[1] for element in model_outputs])
+            fpr, tpr, thresholds = roc_curve(labels, scores)
+            auroc = auc(fpr, tpr)
+            auprc = average_precision_score(labels, scores)
+            return (
+                {
+                    **{
+                        "mcc": mcc,
+                        "tp": tp,
+                        "tn": tn,
+                        "fp": fp,
+                        "fn": fn,
+                        "auroc": auroc,
+                        "auprc": auprc,
                     },
-                    wrong,
-                )
-            else:
-                scores = np.array([softmax(element)[1] for element in model_outputs])
-                fpr, tpr, thresholds = roc_curve(labels, scores)
-                auroc = auc(fpr, tpr)
-                auprc = average_precision_score(labels, scores)
-                return (
-                    {
-                        **{
-                            "mcc": mcc,
-                            "tp": tp,
-                            "tn": tn,
-                            "fp": fp,
-                            "fn": fn,
-                            "auroc": auroc,
-                            "auprc": auprc,
-                        },
-                        **extra_metrics,
-                    },
-                    wrong,
-                )
+                    **extra_metrics,
+                },
+                wrong,
+            )
         else:
             return {**{"mcc": mcc}, **extra_metrics}, wrong 
 
@@ -444,7 +409,6 @@ class SemevalModel:
         self,
         eval_df,
         output_dir,
-        multi_label=False,
         prefix="",
         verbose=True,
         silent=False,
@@ -514,14 +478,10 @@ class SemevalModel:
                     eval_df.iloc[:, 1].tolist(),
                 )
 
-            if args.sliding_window:
-                eval_dataset, window_counts = self.load_and_cache_examples(
-                    eval_examples, evaluate=True, verbose=verbose, silent=silent
-                )
-            else:
-                eval_dataset = self.load_and_cache_examples(
-                    eval_examples, evaluate=True, verbose=verbose, silent=silent
-                )
+            
+            eval_dataset = self.load_and_cache_examples(
+                eval_examples, evaluate=True, verbose=verbose, silent=silent
+            )
         os.makedirs(eval_output_dir, exist_ok=True)
 
         eval_sampler = SequentialSampler(eval_dataset)
@@ -536,15 +496,11 @@ class SemevalModel:
         nb_eval_steps = 0
         n_batches = len(eval_dataloader)
         preds = np.empty((len(eval_dataset), self.num_labels))
-        if multi_label:
-            out_label_ids = np.empty((len(eval_dataset), self.num_labels))
-        else:
-            out_label_ids = np.empty((len(eval_dataset)))
+       
+        out_label_ids = np.empty((len(eval_dataset)))
         model.eval()
 
-        if self.args.fp16:
-            from torch.cuda import amp
-
+       
         for i, batch in enumerate(
             tqdm(
                 eval_dataloader,
@@ -557,28 +513,16 @@ class SemevalModel:
             with torch.no_grad():
                 inputs = self._get_inputs_dict(batch)
 
-                if self.args.fp16:
-                    with amp.autocast():
-                        outputs = self._calculate_loss(
-                            model,
-                            inputs,
-                            loss_fct=self.loss_fct,
-                            num_labels=self.num_labels,
-                            args=self.args,
-                        )
-                        tmp_eval_loss, logits = outputs[:2]
-                else:
-                    outputs = self._calculate_loss(
-                        model,
-                        inputs,
-                        loss_fct=self.loss_fct,
-                        num_labels=self.num_labels,
-                        args=self.args,
-                    )
-                    tmp_eval_loss, logits = outputs[:2]
+                outputs = self._calculate_loss(
+                    model,
+                    inputs,
+                    loss_fct=self.loss_fct,
+                    num_labels=self.num_labels,
+                    args=self.args,
+                )
+                tmp_eval_loss, logits = outputs[:2]
 
-                if multi_label:
-                    logits = logits.sigmoid()
+               
                 if self.args.n_gpu > 1:
                     tmp_eval_loss = tmp_eval_loss.mean()
                 eval_loss += tmp_eval_loss.item()
@@ -596,61 +540,18 @@ class SemevalModel:
                 inputs["labels"].detach().cpu().numpy()
             )
 
-            # if preds is None:
-            #     preds = logits.detach().cpu().numpy()
-            #     out_label_ids = inputs["labels"].detach().cpu().numpy()
-            # else:
-            #     preds = np.append(preds, logits.detach().cpu().numpy(), axis=0)
-            #     out_label_ids = np.append(out_label_ids, inputs["labels"].detach().cpu().numpy(), axis=0)
+           
 
         eval_loss = eval_loss / nb_eval_steps
 
-        if args.sliding_window:
-            count = 0
-            window_ranges = []
-            for n_windows in window_counts:
-                window_ranges.append([count, count + n_windows])
-                count += n_windows
-
-            preds = [
-                preds[window_range[0] : window_range[1]]
-                for window_range in window_ranges
-            ]
-            out_label_ids = [
-                out_label_ids[i]
-                for i in range(len(out_label_ids))
-                if i in [window[0] for window in window_ranges]
-            ]
-
-            model_outputs = preds
-            if args.regression is True:
-                preds = [np.squeeze(pred) for pred in preds]
-                final_preds = []
-                for pred_row in preds:
-                    mean_pred = np.mean(pred_row)
-                    print(mean_pred)
-                    final_preds.append(mean_pred)
-            else:
-                preds = [np.argmax(pred, axis=1) for pred in preds]
-                final_preds = []
-                for pred_row in preds:
-                    val_freqs_desc = Counter(pred_row).most_common()
-                    if (
-                        len(val_freqs_desc) > 1
-                        and val_freqs_desc[0][1] == val_freqs_desc[1][1]
-                    ):
-                        final_preds.append(args.tie_value)
-                    else:
-                        final_preds.append(val_freqs_desc[0][0])
-            preds = np.array(final_preds)
-        elif not multi_label and args.regression is True:
+       
+        if  args.regression is True:
             preds = np.squeeze(preds)
             model_outputs = preds
         else:
             model_outputs = preds
 
-            if not multi_label:
-                preds = np.argmax(preds, axis=1)
+            preds = np.argmax(preds, axis=1)
 
         result, wrong = self.compute_metrics(
             preds, model_outputs, out_label_ids, eval_examples, **kwargs
@@ -663,30 +564,12 @@ class SemevalModel:
             for key in sorted(result.keys()):
                 writer.write("{} = {}\n".format(key, str(result[key])))
 
-        if (
-            self.args.wandb_project
-            and wandb_log
-            and not multi_label
-            and not self.args.regression
-        ):
-            
-            if not args.labels_map:
-                self.args.labels_map = {i: i for i in range(self.num_labels)}
-
-            labels_list = sorted(list(self.args.labels_map.keys()))
-            inverse_labels_map = {
-                value: key for key, value in self.args.labels_map.items()
-            }
-
-            truth = [inverse_labels_map[out] for out in out_label_ids]
-
         return results, model_outputs, wrong
 
     def train(
         self,
         train_dataloader,
         output_dir,
-        multi_label=False,
         show_running_loss=True,
         eval_df=None,
         test_df=None,
@@ -890,14 +773,10 @@ class SemevalModel:
 
         if args.evaluate_during_training:
             training_progress_scores = self._create_training_progress_scores(
-                multi_label, **kwargs
+                 **kwargs
             )
 
-        if self.args.fp16:
-            from torch.cuda import amp
-
-            scaler = amp.GradScaler()
-
+      
         for _ in train_iterator:
             model.train()
             if epochs_trained > 0:
@@ -918,23 +797,14 @@ class SemevalModel:
                     continue
 
                 inputs = self._get_inputs_dict(batch)
-                if self.args.fp16:
-                    with amp.autocast():
-                        loss, *_ = self._calculate_loss(
-                            model,
-                            inputs,
-                            loss_fct=self.loss_fct,
-                            num_labels=self.num_labels,
-                            args=self.args,
-                        )
-                else:
-                    loss, *_ = self._calculate_loss(
-                        model,
-                        inputs,
-                        loss_fct=self.loss_fct,
-                        num_labels=self.num_labels,
-                        args=self.args,
-                    )
+                
+                loss, *_ = self._calculate_loss(
+                    model,
+                    inputs,
+                    loss_fct=self.loss_fct,
+                    num_labels=self.num_labels,
+                    args=self.args,
+                )
 
                 if args.n_gpu > 1:
                     loss = (
@@ -951,25 +821,18 @@ class SemevalModel:
                 if args.gradient_accumulation_steps > 1:
                     loss = loss / args.gradient_accumulation_steps
 
-                if self.args.fp16:
-                    scaler.scale(loss).backward()
-                else:
-                    loss.backward()
+                
+                loss.backward()
 
                 tr_loss += loss.item()
                 if (step + 1) % args.gradient_accumulation_steps == 0:
-                    if self.args.fp16:
-                        scaler.unscale_(optimizer)
+                 
                     if args.optimizer == "AdamW":
                         torch.nn.utils.clip_grad_norm_(
                             model.parameters(), args.max_grad_norm
                         )
 
-                    if self.args.fp16:
-                        scaler.step(optimizer)
-                        scaler.update()
-                    else:
-                        optimizer.step()
+                    optimizer.step()
                     scheduler.step()  # Update learning rate schedule
                     model.zero_grad()
                     global_step += 1
@@ -1361,61 +1224,9 @@ class SemevalModel:
     def _get_last_metrics(self, metric_values):
         return {metric: values[-1] for metric, values in metric_values.items()}
 
-    def _create_training_progress_scores(self, multi_label, **kwargs):
+    def _create_training_progress_scores(self, **kwargs):
         return collections.defaultdict(list)
-        """extra_metrics = {key: [] for key in kwargs}
-        if multi_label:
-            training_progress_scores = {
-                "global_step": [],
-                "LRAP": [],
-                "train_loss": [],
-                "eval_loss": [],
-                **extra_metrics,
-            }
-        else:
-            if self.model.num_labels == 2:
-                if self.args.sliding_window:
-                    training_progress_scores = {
-                        "global_step": [],
-                        "tp": [],
-                        "tn": [],
-                        "fp": [],
-                        "fn": [],
-                        "mcc": [],
-                        "train_loss": [],
-                        "eval_loss": [],
-                        **extra_metrics,
-                    }
-                else:
-                    training_progress_scores = {
-                        "global_step": [],
-                        "tp": [],
-                        "tn": [],
-                        "fp": [],
-                        "fn": [],
-                        "mcc": [],
-                        "train_loss": [],
-                        "eval_loss": [],
-                        "auroc": [],
-                        "auprc": [],
-                        **extra_metrics,
-                    }
-            elif self.model.num_labels == 1:
-                training_progress_scores = {
-                    "global_step": [],
-                    "train_loss": [],
-                    "eval_loss": [],
-                    **extra_metrics,
-                }
-            else:
-                training_progress_scores = {
-                    "global_step": [],
-                    "mcc": [],
-                    "train_loss": [],
-                    "eval_loss": [],
-                    **extra_metrics,
-                }
-        return training_progress_scores"""
+       
 
 
     def load_and_cache_examples(
@@ -1423,7 +1234,6 @@ class SemevalModel:
         examples,
         evaluate=False,
         no_cache=False,
-        multi_label=False,
         verbose=True,
         silent=False,
         ):
@@ -1439,7 +1249,7 @@ class SemevalModel:
         if not no_cache:
             no_cache = args.no_cache
         
-        if not multi_label and args.regression:
+        if args.regression:
             output_mode = "regression"
         else:
             output_mode = "classification"
@@ -1452,7 +1262,6 @@ class SemevalModel:
             self.tokenizer,
             self.args,
             mode=mode,
-            multi_label=multi_label,
             output_mode=output_mode,
             no_cache=no_cache
         )
@@ -1515,7 +1324,7 @@ class SemevalModel:
                 for key in sorted(results.keys()):
                     writer.write("{} = {}\n".format(key, str(results[key])))
 
-    def predict(self, to_predict, multi_label=False):
+    def predict(self, to_predict):
         """
         Performs predictions on a list of text.
         Args:
@@ -1531,286 +1340,83 @@ class SemevalModel:
         eval_loss = 0.0
         nb_eval_steps = 0
         preds = np.empty((len(to_predict), self.num_labels))
-        if multi_label:
-            out_label_ids = np.empty((len(to_predict), self.num_labels))
-        else:
-            out_label_ids = np.empty((len(to_predict)))
+       
+        out_label_ids = np.empty((len(to_predict)))
 
-        if not multi_label and self.args.onnx:
-            model_inputs = self.tokenizer.batch_encode_plus(
-                to_predict, return_tensors="pt", padding=True, truncation=True
+        self._move_model_to_device()
+        dummy_label = (
+            0
+            if not self.args.labels_map
+            else next(iter(self.args.labels_map.keys()))
+        )
+
+        if args.n_gpu > 1:
+            model = torch.nn.DataParallel(model)
+
+        if isinstance(to_predict[0], list):
+            eval_examples = (
+                *zip(*to_predict),
+                [dummy_label for i in range(len(to_predict))],
+            )
+        else:
+            eval_examples = (
+                to_predict,
+                [dummy_label for i in range(len(to_predict))],
             )
 
-            if self.args.model_type in ["bert", "xlnet", "albert", "layoutlm"]:
-                for i, (input_ids, attention_mask, token_type_ids) in enumerate(
-                    zip(
-                        model_inputs["input_ids"],
-                        model_inputs["attention_mask"],
-                        model_inputs["token_type_ids"],
-                    )
-                ):
-                    input_ids = input_ids.unsqueeze(0).detach().cpu().numpy()
-                    attention_mask = attention_mask.unsqueeze(0).detach().cpu().numpy()
-                    token_type_ids = token_type_ids.unsqueeze(0).detach().cpu().numpy()
-                    inputs_onnx = {
-                        "input_ids": input_ids,
-                        "attention_mask": attention_mask,
-                        "token_type_ids": token_type_ids,
-                    }
+        
+        eval_dataset = self.load_and_cache_examples(
+            eval_examples, evaluate=True, no_cache=True
+        )
 
-                    # Run the model (None = get all the outputs)
-                    output = self.model.run(None, inputs_onnx)
+        eval_sampler = SequentialSampler(eval_dataset)
+        eval_dataloader = DataLoader(
+            eval_dataset, sampler=eval_sampler, batch_size=args.eval_batch_size
+        )
 
-                    preds[i] = output[0]
+        n_batches = len(eval_dataloader)
+        for i, batch in enumerate(tqdm(eval_dataloader, disable=args.silent)):
+            model.eval()
+            # batch = tuple(t.to(device) for t in batch)
 
-            else:
-                for i, (input_ids, attention_mask) in enumerate(
-                    zip(model_inputs["input_ids"], model_inputs["attention_mask"])
-                ):
-                    input_ids = input_ids.unsqueeze(0).detach().cpu().numpy()
-                    attention_mask = attention_mask.unsqueeze(0).detach().cpu().numpy()
-                    inputs_onnx = {
-                        "input_ids": input_ids,
-                        "attention_mask": attention_mask,
-                    }
+            with torch.no_grad():
+                inputs = self._get_inputs_dict(batch, no_hf=True)
 
-                    # Run the model (None = get all the outputs)
-                    output = self.model.run(None, inputs_onnx)
+                outputs = self._calculate_loss(
+                    model,
+                    inputs,
+                    loss_fct=self.loss_fct,
+                    num_labels=self.num_labels,
+                    args=self.args,
+                )
+                tmp_eval_loss, logits = outputs[:2]
 
-                    preds[i] = output[0]
+                if self.args.n_gpu > 1:
+                    tmp_eval_loss = tmp_eval_loss.mean()
+                eval_loss += tmp_eval_loss.item()
 
+            nb_eval_steps += 1
+
+            start_index = self.args.eval_batch_size * i
+            end_index = (
+                start_index + self.args.eval_batch_size
+                if i != (n_batches - 1)
+                else len(eval_dataset)
+            )
+            preds[start_index:end_index] = logits.detach().cpu().numpy()
+            out_label_ids[start_index:end_index] = (
+                inputs["labels"].detach().cpu().numpy()
+            )
+
+        eval_loss = eval_loss / nb_eval_steps
+
+        if args.regression is True:
+            preds = np.squeeze(preds)
             model_outputs = preds
-            preds = np.argmax(preds, axis=1)
-
         else:
-            self._move_model_to_device()
-            dummy_label = (
-                0
-                if not self.args.labels_map
-                else next(iter(self.args.labels_map.keys()))
-            )
-
-            if multi_label:
-                dummy_label = [dummy_label for i in range(self.num_labels)]
-
-            if args.n_gpu > 1:
-                model = torch.nn.DataParallel(model)
-
-            if isinstance(to_predict[0], list):
-                eval_examples = (
-                    *zip(*to_predict),
-                    [dummy_label for i in range(len(to_predict))],
-                )
-            else:
-                eval_examples = (
-                    to_predict,
-                    [dummy_label for i in range(len(to_predict))],
-                )
-
-            if args.sliding_window:
-                eval_dataset, window_counts = self.load_and_cache_examples(
-                    eval_examples, evaluate=True, no_cache=True
-                )
-                preds = np.empty((len(eval_dataset), self.num_labels))
-                if multi_label:
-                    out_label_ids = np.empty((len(eval_dataset), self.num_labels))
-                else:
-                    out_label_ids = np.empty((len(eval_dataset)))
-            else:
-                eval_dataset = self.load_and_cache_examples(
-                    eval_examples, evaluate=True, multi_label=multi_label, no_cache=True
-                )
-
-            eval_sampler = SequentialSampler(eval_dataset)
-            eval_dataloader = DataLoader(
-                eval_dataset, sampler=eval_sampler, batch_size=args.eval_batch_size
-            )
-
-            if self.args.fp16:
-                from torch.cuda import amp
-
-            if self.config.output_hidden_states:
-                model.eval()
-                preds = None
-                out_label_ids = None
-                for i, batch in enumerate(
-                    tqdm(
-                        eval_dataloader, disable=args.silent, desc="Running Prediction"
-                    )
-                ):
-                    # batch = tuple(t.to(self.device) for t in batch)
-                    with torch.no_grad():
-                        inputs = self._get_inputs_dict(batch, no_hf=True)
-
-                        if self.args.fp16:
-                            with amp.autocast():
-                                outputs = self._calculate_loss(
-                                    model,
-                                    inputs,
-                                    loss_fct=self.loss_fct,
-                                    num_labels=self.num_labels,
-                                    args=self.args,
-                                )
-                                tmp_eval_loss, logits = outputs[:2]
-                        else:
-                            outputs = self._calculate_loss(
-                                model,
-                                inputs,
-                                loss_fct=self.loss_fct,
-                                num_labels=self.num_labels,
-                                args=self.args,
-                            )
-                            tmp_eval_loss, logits = outputs[:2]
-                        embedding_outputs, layer_hidden_states = (
-                            outputs[2][0],
-                            outputs[2][1:],
-                        )
-
-                        if multi_label:
-                            logits = logits.sigmoid()
-
-                        if self.args.n_gpu > 1:
-                            tmp_eval_loss = tmp_eval_loss.mean()
-                        eval_loss += tmp_eval_loss.item()
-
-                    nb_eval_steps += 1
-
-                    if preds is None:
-                        preds = logits.detach().cpu().numpy()
-                        out_label_ids = inputs["labels"].detach().cpu().numpy()
-                        all_layer_hidden_states = np.array(
-                            [
-                                state.detach().cpu().numpy()
-                                for state in layer_hidden_states
-                            ]
-                        )
-                        all_embedding_outputs = embedding_outputs.detach().cpu().numpy()
-                    else:
-                        preds = np.append(preds, logits.detach().cpu().numpy(), axis=0)
-                        out_label_ids = np.append(
-                            out_label_ids,
-                            inputs["labels"].detach().cpu().numpy(),
-                            axis=0,
-                        )
-                        all_layer_hidden_states = np.append(
-                            all_layer_hidden_states,
-                            np.array(
-                                [
-                                    state.detach().cpu().numpy()
-                                    for state in layer_hidden_states
-                                ]
-                            ),
-                            axis=1,
-                        )
-                        all_embedding_outputs = np.append(
-                            all_embedding_outputs,
-                            embedding_outputs.detach().cpu().numpy(),
-                            axis=0,
-                        )
-            else:
-                n_batches = len(eval_dataloader)
-                for i, batch in enumerate(tqdm(eval_dataloader, disable=args.silent)):
-                    model.eval()
-                    # batch = tuple(t.to(device) for t in batch)
-
-                    with torch.no_grad():
-                        inputs = self._get_inputs_dict(batch, no_hf=True)
-
-                        if self.args.fp16:
-                            with amp.autocast():
-                                outputs = self._calculate_loss(
-                                    model,
-                                    inputs,
-                                    loss_fct=self.loss_fct,
-                                    num_labels=self.num_labels,
-                                    args=self.args,
-                                )
-                                tmp_eval_loss, logits = outputs[:2]
-                        else:
-                            outputs = self._calculate_loss(
-                                model,
-                                inputs,
-                                loss_fct=self.loss_fct,
-                                num_labels=self.num_labels,
-                                args=self.args,
-                            )
-                            tmp_eval_loss, logits = outputs[:2]
-
-                        if multi_label:
-                            logits = logits.sigmoid()
-
-                        if self.args.n_gpu > 1:
-                            tmp_eval_loss = tmp_eval_loss.mean()
-                        eval_loss += tmp_eval_loss.item()
-
-                    nb_eval_steps += 1
-
-                    start_index = self.args.eval_batch_size * i
-                    end_index = (
-                        start_index + self.args.eval_batch_size
-                        if i != (n_batches - 1)
-                        else len(eval_dataset)
-                    )
-                    preds[start_index:end_index] = logits.detach().cpu().numpy()
-                    out_label_ids[start_index:end_index] = (
-                        inputs["labels"].detach().cpu().numpy()
-                    )
-
-            eval_loss = eval_loss / nb_eval_steps
-
-            if args.sliding_window:
-                count = 0
-                window_ranges = []
-                for n_windows in window_counts:
-                    window_ranges.append([count, count + n_windows])
-                    count += n_windows
-
-                preds = [
-                    preds[window_range[0] : window_range[1]]
-                    for window_range in window_ranges
-                ]
-
-                model_outputs = preds
-                if args.regression is True:
-                    preds = [np.squeeze(pred) for pred in preds]
-                    final_preds = []
-                    for pred_row in preds:
-                        mean_pred = np.mean(pred_row)
-                        print(mean_pred)
-                        final_preds.append(mean_pred)
-                    preds = np.array(final_preds)
-                else:
-                    preds = [np.argmax(pred, axis=1) for pred in preds]
-                    final_preds = []
-                    for pred_row in preds:
-                        mode_pred, counts = mode(pred_row)
-                        if len(counts) > 1 and counts[0] == counts[1]:
-                            final_preds.append(args.tie_value)
-                        else:
-                            final_preds.append(mode_pred[0])
-                    preds = np.array(final_preds)
-            elif not multi_label and args.regression is True:
-                preds = np.squeeze(preds)
-                model_outputs = preds
-            else:
-                model_outputs = preds
-                if multi_label:
-                    if isinstance(args.threshold, list):
-                        threshold_values = args.threshold
-                        preds = [
-                            [
-                                self._threshold(pred, threshold_values[i])
-                                for i, pred in enumerate(example)
-                            ]
-                            for example in preds
-                        ]
-                    else:
-                        preds = [
-                            [self._threshold(pred, args.threshold) for pred in example]
-                            for example in preds
-                        ]
-                else:
-                    preds = np.argmax(preds, axis=1)
+            model_outputs = preds
+          
+            preds = np.argmax(preds, axis=1)
 
         if self.args.labels_map and not self.args.regression:
             inverse_labels_map = {
@@ -1818,8 +1424,6 @@ class SemevalModel:
             }
             preds = [inverse_labels_map[pred] for pred in preds]
 
-        if self.config.output_hidden_states:
-            return preds, model_outputs, all_embedding_outputs, all_layer_hidden_states
-        else:
-            return preds, model_outputs  
+       
+        return preds, model_outputs  
         

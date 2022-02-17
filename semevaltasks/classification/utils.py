@@ -159,7 +159,7 @@ def preprocess_data(text_a, text_b, labels, tokenizer, max_seq_length):
 
 
 def build_classification_dataset(
-    data, tokenizer, args, mode, multi_label, output_mode, no_cache
+    data, tokenizer, args, mode, output_mode, no_cache
 ):
     cached_features_file = os.path.join(
         args.cache_dir,
@@ -191,10 +191,8 @@ def build_classification_dataset(
 
         # If labels_map is defined, then labels need to be replaced with ints
         if args.labels_map and not args.regression:
-            if multi_label:
-                labels = [[args.labels_map[l] for l in label] for label in labels]
-            else:
-                labels = [args.labels_map[label] for label in labels]
+           
+            labels = [args.labels_map[label] for label in labels]
 
         if (mode == "train" and args.use_multiprocessing) or (
             mode == "dev" and args.use_multiprocessing_for_evaluation
@@ -253,9 +251,9 @@ def build_classification_dataset(
 
 
 class ClassificationDataset(Dataset):
-    def __init__(self, data, tokenizer, args, mode, multi_label, output_mode, no_cache):
+    def __init__(self, data, tokenizer, args, mode, output_mode, no_cache):
         self.examples, self.labels = build_classification_dataset(
-            data, tokenizer, args, mode, multi_label, output_mode, no_cache
+            data, tokenizer, args, mode, output_mode, no_cache
         )
 
     def __len__(self):
@@ -268,16 +266,14 @@ class ClassificationDataset(Dataset):
         )
 
 
-def map_labels_to_numeric(example, multi_label, args):
-    if multi_label:
-        example["labels"] = [args.labels_map[label] for label in example["labels"]]
-    else:
-        example["labels"] = args.labels_map[example["labels"]]
+def map_labels_to_numeric(example, args):
+   
+    example["labels"] = args.labels_map[example["labels"]]
 
     return example
 
 
-def load_hf_dataset(data, tokenizer, args, multi_label):
+def load_hf_dataset(data, tokenizer, args):
     if isinstance(data, str):
         dataset = load_dataset(
             "csv",
@@ -291,7 +287,7 @@ def load_hf_dataset(data, tokenizer, args, multi_label):
         dataset = HFDataset.from_pandas(data)
 
     if args.labels_map and not args.regression:
-        dataset = dataset.map(lambda x: map_labels_to_numeric(x, multi_label, args))
+        dataset = dataset.map(lambda x: map_labels_to_numeric(x, args))
 
     dataset = dataset.map(
         lambda x: preprocess_batch_for_hf_dataset(
@@ -337,7 +333,7 @@ def convert_example_to_feature(
         pad_on_left,
         pad_token_segment_id,
         sep_token_extra,
-        multi_label,
+       
         stride,
         pad_token,
         add_prefix_space,
@@ -501,7 +497,6 @@ def convert_example_to_feature_sliding_window(
         pad_on_left,
         pad_token_segment_id,
         sep_token_extra,
-        multi_label,
         stride,
         pad_token,
         add_prefix_space,
@@ -623,7 +618,6 @@ def convert_examples_to_features(
     pad_token_segment_id=0,
     mask_padding_with_zero=True,
     process_count=cpu_count() - 2,
-    multi_label=False,
     silent=False,
     use_multiprocessing=True,
     sliding_window=False,
@@ -653,7 +647,6 @@ def convert_examples_to_features(
             pad_on_left,
             pad_token_segment_id,
             sep_token_extra,
-            multi_label,
             stride,
             pad_token,
             add_prefix_space,
@@ -776,7 +769,7 @@ class JsonlDataset(Dataset):
         images_label=None,
         image_type_extension=None,
         data_type_extension=None,
-        multi_label=False,
+        
     ):
 
         self.text_label = text_label if text_label else "text"
@@ -784,7 +777,7 @@ class JsonlDataset(Dataset):
         self.images_label = images_label if images_label else "images"
         self.image_type_extension = image_type_extension if image_type_extension else ""
         self.data_type_extension = data_type_extension if data_type_extension else ""
-        self.multi_label = multi_label
+       
 
         if isinstance(files_list, str):
             files_list = json.load(open(files_list))
@@ -830,13 +823,8 @@ class JsonlDataset(Dataset):
         start_token, sentence, end_token = sentence[0], sentence[1:-1], sentence[-1]
         sentence = sentence[: self.max_seq_length]
 
-        if self.multi_label:
-            label = torch.zeros(self.n_classes)
-            label[
-                [self.labels.index(tgt) for tgt in self.data[index][self.labels_label]]
-            ] = 1
-        else:
-            label = torch.tensor(self.labels.index(self.data[index][self.labels_label]))
+       
+        label = torch.tensor(self.labels.index(self.data[index][self.labels_label]))
 
         image = Image.open(
             os.path.join(self.data_dir, self.data[index]["images"])
