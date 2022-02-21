@@ -1340,6 +1340,8 @@ class SemevalModel:
         eval_loss = 0.0
         nb_eval_steps = 0
         preds = np.empty((len(to_predict), self.num_labels))
+
+        loss = np.empty((len(to_predict), self.num_labels))
        
         out_label_ids = np.empty((len(to_predict)))
 
@@ -1390,6 +1392,8 @@ class SemevalModel:
                     args=self.args,
                 )
                 tmp_eval_loss, logits = outputs[:2]
+                
+
 
                 if self.args.n_gpu > 1:
                     tmp_eval_loss = tmp_eval_loss.mean()
@@ -1404,6 +1408,7 @@ class SemevalModel:
                 else len(eval_dataset)
             )
             preds[start_index:end_index] = logits.detach().cpu().numpy()
+            loss[start_index:end_index] = tmp_eval_loss.detach().cpu().numpy()
             out_label_ids[start_index:end_index] = (
                 inputs["labels"].detach().cpu().numpy()
             )
@@ -1425,5 +1430,5 @@ class SemevalModel:
             preds = [inverse_labels_map[pred] for pred in preds]
 
        
-        return preds, model_outputs, tmp_eval_loss  
+        return preds, model_outputs, loss  
         
