@@ -1430,5 +1430,5 @@ class SemevalModel:
             preds = [inverse_labels_map[pred] for pred in preds]
 
        
-        return preds, model_outputs, loss  
+        return preds, model_outputs, loss, eval_loss 
         
