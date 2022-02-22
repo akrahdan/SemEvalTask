@@ -1341,7 +1341,7 @@ class SemevalModel:
         nb_eval_steps = 0
         preds = np.empty((len(to_predict), self.num_labels))
 
-        loss = np.empty((len(to_predict), self.num_labels))
+        loss = np.empty((len(to_predict), 1))
        
         out_label_ids = np.empty((len(to_predict)))
 
