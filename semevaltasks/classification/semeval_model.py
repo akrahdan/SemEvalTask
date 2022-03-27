@@ -51,7 +51,11 @@ from transformers import (
     ElectraForSequenceClassification,
     RobertaConfig,
     RobertaTokenizerFast,
-    RobertaForSequenceClassification
+    RobertaForSequenceClassification,
+    BertConfig,
+    BertTokenizerFast,
+    BertForSequenceClassification,
+
 )
 from transformers.optimization import (
     get_constant_schedule,
@@ -79,6 +83,11 @@ class SemevalModel:
         **kwargs,):
 
         MODEL_CLASSES = {
+            "bert" : (
+                BertConfig,
+                BertTokenizerFast,
+                BertForSequenceClassification,
+            ),
             "electra": (
                 ElectraConfig,
                 ElectraForSequenceClassification,
